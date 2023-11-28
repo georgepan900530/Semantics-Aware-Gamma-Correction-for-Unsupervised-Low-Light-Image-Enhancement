@@ -3,6 +3,7 @@ import os
 import numpy as np
 from skimage.metrics import mean_squared_error
 from skimage.metrics import peak_signal_noise_ratio
+from skimage.metrics import structural_similarity as ssim
 import argparse
 import math
 from scipy.special import gamma
@@ -14,14 +15,15 @@ import lpips
 parser = argparse.ArgumentParser()
 parser.add_argument("--ref_path", required=True, type=str, help="path to the directory of reference images")
 parser.add_argument("--output_path", required=True, type=str, help="path to the directory of enhanced images")
-parser.add_argument("--niqe_path", required=True, type=str, help="path to niqe model parameters")
-parser.add_argument("--test_low", required=False, type=bool, default=False ,help="if test on low-light image: True")
+parser.add_argument("--niqe_path", type=str, default = "niqe/mvg_params.mat", help="path to niqe model parameters")
 opt = parser.parse_args()
 
 alpha_p = np.arange(0.2, 10, 0.001)
 alpha_r_p = scipy.special.gamma(2.0 / alpha_p) ** 2 / (scipy.special.gamma(1.0 / alpha_p) * scipy.special.gamma(3. / alpha_p))
 loss_fn = lpips.LPIPS(net='alex', spatial = True)
 loss_fn.cuda()
+
+
 def estimate_aggd_params(x):
     x_left = x[x < 0]
     x_right = x[x >= 0]
@@ -108,6 +110,7 @@ def niqe(image):
 
     return niqe_quality
 
+
 def populate_list(images_path):
 	cwd = os.getcwd()
 	path = os.path.join(cwd, str(images_path))
@@ -115,51 +118,19 @@ def populate_list(images_path):
 	image_list.sort()
 	return image_list
 
-def ssim(img1, img2):
-	C1 = (0.01 * 255) ** 2
-	C2 = (0.03 * 255) ** 2
-	img1 = img1.astype(np.float64)
-	img2 = img2.astype(np.float64)
-	kernel = cv2.getGaussianKernel(11, 1.5)
-	window = np.outer(kernel, kernel.transpose())
-	mu1 = cv2.filter2D(img1, -1, window)[5:-5, 5:-5]  # valid
-	mu2 = cv2.filter2D(img2, -1, window)[5:-5, 5:-5]
-	mu1_sq = mu1 ** 2
-	mu2_sq = mu2 ** 2
-	mu1_mu2 = mu1 * mu2
-	sigma1_sq = cv2.filter2D(img1 ** 2, -1, window)[5:-5, 5:-5] - mu1_sq
-	sigma2_sq = cv2.filter2D(img2 ** 2, -1, window)[5:-5, 5:-5] - mu2_sq
-	sigma12 = cv2.filter2D(img1 * img2, -1, window)[5:-5, 5:-5] - mu1_mu2
-	ssim_map = ((2 * mu1_mu2 + C1) * (2 * sigma12 + C2)) / ((mu1_sq + mu2_sq + C1) *
-															(sigma1_sq + sigma2_sq + C2))
-	return ssim_map.mean()
-
 
 def calculate_ssim(img1, img2):
-	'''calculate SSIM
-	the same outputs as MATLAB's
-	img1, img2: [0, 255]
-	'''
-	if not img1.shape == img2.shape:
-		raise ValueError('Input images must have the same dimensions.')
-	if img1.ndim == 2:
-		return ssim(img1, img2)
-	elif img1.ndim == 3:
-		if img1.shape[2] == 3:
-			ssims = []
-			for i in range(3):
-				ssims.append(ssim(img1, img2))
-			return np.array(ssims).mean()
-		elif img1.shape[2] == 1:
-			return ssim(np.squeeze(img1), np.squeeze(img2))
-	else:
-		raise ValueError('Wrong input image dimensions.')
+    img1 = cv2.cvtColor(img1,cv2.COLOR_BGR2GRAY)
+    img2 = cv2.cvtColor(img2,cv2.COLOR_BGR2GRAY)
+    sim = ssim(img1, img2)
+    return sim
+    
 
 def im2tensor(image, imtype=np.uint8, cent=1., factor=255./2.):
     return torch.Tensor((image / factor - cent)[:, :, :, np.newaxis].transpose((3, 2, 0, 1)))
+
+
 def Lpips(img1, img2):
-    #ref = lpips.im2tensor(lpips.load_image(img1))
-    #output = lpips.im2tensor(lpips.load_image(img2))
     ref = img1[:,:,::-1]
     output = img2
     output = cv2.resize(img2, (ref.shape[1], ref.shape[0]), interpolation=cv2.INTER_AREA)
@@ -170,12 +141,12 @@ def Lpips(img1, img2):
     output = output.cuda()
     d = loss_fn.forward(ref, output)
     return d.mean().cpu().detach().numpy()
-    
+
+
 def get_maximum(img2, histsize):
     maximum2 = 0
     for i in range(3):
         range_v = 180 if i == 0 else 256  # 180 for H, 256 for S,V
-
         hist2 = cv2.calcHist([cv2.cvtColor(img2, cv2.COLOR_BGR2HSV)], [i], None, [range_v / histsize], [0, range_v])
 
         if np.max(hist2, 0)[0] > maximum2:
@@ -269,104 +240,43 @@ def peak_aligning(peaks1, peaks2, threshold=0.25):
     return peaks1, peaks2
 
 
-def CSE(img1, img2, histsize=4, Pcount=2, Kdiff=1, Ithreshold=0.25):
-    '''
-    function: given two images, return CSE value.
-    input:  range:[0,255]   type:uint8    format:[h,w,c]   BGR(Note: not RGB)
-    output: a python value, i.e., color-sensitive error (CSE)
-    '''
-
-    maximum2 = get_maximum(img2, histsize)
-    comp_weight = get_comp_weight(img1, img2, histsize)
-    error = 0
-    for i in range(3):
-        range_v = 180 if i == 0 else 256  # 180 for H, 256 for S,V
-        hist1 = cv2.calcHist([cv2.cvtColor(img1, cv2.COLOR_BGR2HSV)], [i], None, [range_v / histsize], [0, range_v])
-        hist2 = cv2.calcHist([cv2.cvtColor(img2, cv2.COLOR_BGR2HSV)], [i], None, [range_v / histsize], [0, range_v])
-
-        if np.max(hist2, 0)[0] < maximum2 * Ithreshold:
-            error += (1 / range_v) * comp_weight[i] * np.sqrt(np.mean((hist1 - hist2) ** 2))
-            continue
-
-        peak1 = peak_positioning(hist1.squeeze(-1), Pcount)
-        peak2 = peak_positioning(hist2.squeeze(-1), Pcount)
-        peak1, peak2 = peak_aligning(peak1, peak2, 0.3)
-        peak_weight = get_peak_weight(peak1, peak2)
-
-        distance = 0
-        for j in range(Pcount):
-            distance += math.fabs(peak1[j][0] - peak2[j][0]) * peak_weight[j]
-
-        diff1 = make_diff(hist1, Kdiff)
-        diff2 = make_diff(hist2, Kdiff)
-        integral = np.abs(get_integral(diff1) - get_integral(diff2))[0]
-
-        error += (1 / range_v) * comp_weight[i] * integral * math.exp(math.sqrt(distance))
-
-    return error
-    
-
-
 if __name__ == '__main__':
-	#ref_path = 'data/train_data/LOL/high/'
-	#output_path = 'data/test_output/low/'
-	#ref_path = 'data/mm20data/test/test_H/'
-	#output_path = "/home/YHr10942/pfc/EnlightenGAN/EnlightenGAN-master/Results/"
-  ref_path = opt.ref_path
-  output_path = opt.output_path
-  reference_list = populate_list(ref_path)
-  output_list = populate_list(output_path)
-  low = opt.test_low
-  print(len(reference_list), len(output_list))
-  print(reference_list[0], output_list[0])
-  MSE_list = []
-  PSNR_list = []
-  SSIM_list = []
-  NIQE_list = []
-  LPIPS_list = []
-  CSE_list = []
-  for idx in range(len(reference_list)):
-    img1 = cv2.imread(os.path.join(os.getcwd(), ref_path, reference_list[idx]))
-    img2 = cv2.imread(os.path.join(os.getcwd(), output_path, output_list[idx]))
-    img2 = cv2.resize(img2, (img1.shape[1], img1.shape[0]), interpolation=cv2.INTER_AREA)
-    #print(img2.max())
-    # print(output_list[idx])
-    MSE = mean_squared_error(img1, img2)
-    PSNR = peak_signal_noise_ratio(img1, img2)
-    SSIM = calculate_ssim(img1, img2)
-    NIQE = niqe(img2)
-    LPIPS = Lpips(img1, img2)
-    # cse = CSE(img1, img2)
-    cse = 0
-    print('MSE: ', MSE)
-    print('PSNR: ', PSNR)
-    print('SSIM: ', SSIM)
-    print('NIQE: ', NIQE)
-    print('LPIPS: ', LPIPS)
-    print('CSE: ', cse)
-    MSE_list.append(MSE)
-    PSNR_list.append(PSNR)
-    SSIM_list.append(SSIM)
-    NIQE_list.append(NIQE)
-    LPIPS_list.append(LPIPS)
-    CSE_list.append(cse)
-  sortedPSNR = np.argsort(np.array(PSNR_list))
-  sortedSSIM = np.argsort(np.array(SSIM_list))
-  for i in range(10):
-    print(output_list[sortedPSNR[-i]])
+    ref_path = opt.ref_path
+    output_path = opt.output_path
+    reference_list = populate_list(ref_path)
+    output_list = populate_list(output_path)
+    
+    MSE_list = []
+    PSNR_list = []
+    SSIM_list = []
+    NIQE_list = []
+    LPIPS_list = []
 
-  print('\n\n')
-  
-  for i in range(10):
-    print(output_list[sortedSSIM[-i]])
-	
-  print('MSE = ', np.array(MSE_list).mean() / (255*255))
-  print('PSNR = ', np.array(PSNR_list).mean())
-  print('SSIM = ', np.array(SSIM_list).mean())
-  print('NIQE = ', np.array(NIQE_list).mean())
-  print('LPIPS = ', np.array(LPIPS_list).mean())
-  print('CSE = ', np.array(CSE_list).mean())
-  if low == True:
-      print('CSE(ratio) = ', np.array(CSE_list).mean()/20292.465560863002)
-  else:
-      print('CSE(ratio) = ', np.array(CSE_list).mean()/1450.6354374043135)
+    for idx in range(len(reference_list)):
+        img1 = cv2.imread(os.path.join(os.getcwd(), ref_path, reference_list[idx]))
+        img2 = cv2.imread(os.path.join(os.getcwd(), output_path, output_list[idx]))
+        img2 = cv2.resize(img2, (img1.shape[1], img1.shape[0]), interpolation=cv2.INTER_AREA)
+
+        MSE = mean_squared_error(img1, img2)
+        PSNR = peak_signal_noise_ratio(img1, img2)
+        SSIM = calculate_ssim(img1, img2)
+        NIQE = niqe(img2)
+        LPIPS = Lpips(img1, img2)
+
+        print('MSE: ', MSE)
+        print('PSNR: ', PSNR)
+        print('SSIM: ', SSIM)
+        print('NIQE: ', NIQE)
+        print('LPIPS: ', LPIPS)
+        MSE_list.append(MSE)
+        PSNR_list.append(PSNR)
+        SSIM_list.append(SSIM)
+        NIQE_list.append(NIQE)
+        LPIPS_list.append(LPIPS)
+
+    print('\nFinal Averaged Score:\n')
+    print('MSE = ', np.array(MSE_list).mean() / (255*255))
+    print('PSNR = ', np.array(PSNR_list).mean())
+    print('SSIM = ', np.array(SSIM_list).mean())
+    print('LPIPS = ', np.array(LPIPS_list).mean())
+    print('NIQE = ', np.array(NIQE_list).mean())

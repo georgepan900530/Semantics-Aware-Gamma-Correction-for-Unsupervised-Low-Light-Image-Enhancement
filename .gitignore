@@ -1,0 +1,7 @@
+data/
+info.txt
+*.mp4
+*.pptx
+ICASSP2023_slide.pdf
+.DS_Store
+__pycache__/
