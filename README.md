@@ -28,10 +28,8 @@ pip install -r requirements.txt
 
 ## 2. Prepare Datasets
 ### Dark CityScapes (mm20data)
-To unzip the dataset (data/mm20.zip) under the data folder, run in terminal:
-```
-unzip data/mm20.zip -d data/
-```
+Download the data from [SGZ](https://github.com/ShenZheng2000/Semantic-Guided-Low-Light-Image-Enhancement).< br/>
+Create a folder `data` and unzip the dataset under the `data` folder.
 
 # Training
 
